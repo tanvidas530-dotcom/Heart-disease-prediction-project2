@@ -1,1 +1,191 @@
-t
+"""
+heart_disease_pipeline.py
+Full pipeline: preprocessing, EDA, correlation, train/test, compare classifiers (SVM, KNN, DT, LR, RF),
+show results and save best model.
+
+Usage:
+    python heart_disease_pipeline.py
+Assumes dataset file 'heart.csv' in same directory. If named differently, set DATA_PATH variable.
+"""
+
+import os
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+from sklearn.model_selection import train_test_split, cross_val_score, GridSearchCV, StratifiedKFold
+from sklearn.preprocessing import StandardScaler
+from sklearn.impute import SimpleImputer
+from sklearn.pipeline import Pipeline
+from sklearn.metrics import accuracy_score, classification_report, confusion_matrix
+from sklearn.svm import SVC
+from sklearn.neighbors import KNeighborsClassifier
+from sklearn.tree import DecisionTreeClassifier
+from sklearn.linear_model import LogisticRegression
+from sklearn.ensemble import RandomForestClassifier
+import joblib
+
+# ---------- Configuration ----------
+DATA_PATH = "heart.csv"   # change filename if needed
+RANDOM_STATE = 42
+RESULTS_DIR = "results"
+os.makedirs(RESULTS_DIR, exist_ok=True)
+
+# ---------- Load dataset ----------
+if not os.path.exists(DATA_PATH):
+    raise FileNotFoundError(f"Dataset not found: {DATA_PATH}. Place heart.csv in the script folder or change DATA_PATH.")
+
+df = pd.read_csv(DATA_PATH)
+print("Dataset loaded. Shape:", df.shape)
+print("Columns:", df.columns.tolist())
+
+# ---------- Quick look ----------
+print("\nFirst 5 rows:\n", df.head())
+print("\nInfo:")
+print(df.info())
+print("\nDescribe:\n", df.describe())
+
+# ---------- Data preprocessing suggestions ----------
+# NOTE: different heart datasets use slightly different column names (e.g., 'target', 'HeartDisease', 'output').
+# Try to detect target column
+possible_targets = ['target', 'Target', 'heart_disease', 'HeartDisease', 'output', 'disease', 'cardio']
+target_col = None
+for c in possible_targets:
+    if c in df.columns:
+        target_col = c
+        break
+
+if target_col is None:
+    # If not found, assume last column is the label
+    target_col = df.columns[-1]
+    print(f"Target column not found by name; using last column: {target_col}")
+
+print("Using target column:", target_col)
+
+# Separate features and label
+X = df.drop(columns=[target_col])
+y = df[target_col]
+
+# If label is not 0/1, try mapping common values (e.g., 'Yes'/'No')
+if y.dtype == object:
+    print("Converting non-numeric target to numeric.")
+    y = y.map(lambda v: 1 if str(v).strip().lower() in ['1','yes','y','true','positive'] else 0)
+
+# ---------- Check missing values ----------
+print("\nMissing values per column:\n", X.isnull().sum())
+
+# If missing values exist, impute numeric with mean
+num_cols = X.select_dtypes(include=[np.number]).columns.tolist()
+cat_cols = X.select_dtypes(exclude=[np.number]).columns.tolist()
+
+imputer_num = SimpleImputer(strategy='mean')
+if X[num_cols].isnull().any().any():
+    X[num_cols] = imputer_num.fit_transform(X[num_cols])
+
+# If categorical columns present, do simple encoding
+if len(cat_cols) > 0:
+    X = pd.get_dummies(X, columns=cat_cols, drop_first=True)
+
+print("\nAfter preprocessing features shape:", X.shape)
+
+# ---------- Exploratory Data Analysis (plots) ----------
+# 1) Class balance
+plt.figure(figsize=(5,4))
+sns.countplot(x=y)
+plt.title("Target class distribution")
+plt.savefig(os.path.join(RESULTS_DIR, "class_distribution.png"))
+plt.close()
+
+# 2) Pairplot overview (careful with many features)
+num_for_pairplot = min(6, len(num_cols))
+if num_for_pairplot >= 2:
+    sns.pairplot(df[num_cols[:num_for_pairplot] + [target_col]], hue=target_col)
+    plt.savefig(os.path.join(RESULTS_DIR, "pairplot.png"))
+    plt.close()
+
+# 3) Correlation matrix (heatmap)
+corr = pd.concat([X, y.rename(target_col)], axis=1).corr()
+plt.figure(figsize=(12,10))
+sns.heatmap(corr, annot=True, fmt=".2f", cmap='coolwarm', square=True)
+plt.title("Correlation matrix")
+plt.tight_layout()
+plt.savefig(os.path.join(RESULTS_DIR, "correlation_matrix.png"))
+plt.close()
+
+# Save correlation matrix CSV too
+corr.to_csv(os.path.join(RESULTS_DIR, "correlation_matrix.csv"))
+
+# 4) Boxplots for a few features by class
+for col in num_cols[:5]:
+    plt.figure(figsize=(6,4))
+    sns.boxplot(x=y, y=X[col])
+    plt.title(f"{col} by target")
+    plt.savefig(os.path.join(RESULTS_DIR, f"box_{col}.png"))
+    plt.close()
+
+# ---------- Train/test split ----------
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, stratify=y, random_state=RANDOM_STATE)
+print("Train/Test shapes:", X_train.shape, X_test.shape)
+
+# ---------- Models to evaluate ----------
+models = {
+    "LogisticRegression": LogisticRegression(max_iter=1000, random_state=RANDOM_STATE),
+    "SVM": SVC(kernel='rbf', probability=True, random_state=RANDOM_STATE),
+    "KNN": KNeighborsClassifier(),
+    "DecisionTree": DecisionTreeClassifier(random_state=RANDOM_STATE),
+    "RandomForest": RandomForestClassifier(n_estimators=100, random_state=RANDOM_STATE)
+}
+
+# ---------- Pipeline: scaling where appropriate ----------
+# We'll scale features for models that need it (LR, SVM, KNN)
+scaler = StandardScaler()
+X_train_scaled = scaler.fit_transform(X_train)
+X_test_scaled  = scaler.transform(X_test)
+
+# ---------- Evaluate with cross-validation and test set ----------
+results = []
+for name, model in models.items():
+    if name in ["LogisticRegression", "SVM", "KNN"]:
+        Xtr, Xte = X_train_scaled, X_test_scaled
+    else:
+        Xtr, Xte = X_train.values, X_test.values
+
+    # 5-fold cross validation accuracy on training set
+    cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=RANDOM_STATE)
+    cv_scores = cross_val_score(model, Xtr, y_train, cv=cv, scoring='accuracy')
+    model.fit(Xtr, y_train)
+    ypred = model.predict(Xte)
+    acc_test = accuracy_score(y_test, ypred)
+    print(f"\nModel: {name}")
+    print(" CV Accuracy: %.4f ± %.4f" % (cv_scores.mean(), cv_scores.std()))
+    print(" Test Accuracy:", acc_test)
+    print(" Classification report:\n", classification_report(y_test, ypred))
+    cm = confusion_matrix(y_test, ypred)
+    print(" Confusion matrix:\n", cm)
+
+    # save details
+    results.append({
+        "model": name,
+        "cv_mean": cv_scores.mean(),
+        "cv_std": cv_scores.std(),
+        "test_acc": acc_test,
+        "model_obj": model
+    })
+
+# ---------- Pick best model by test accuracy ----------
+results_df = pd.DataFrame(results).sort_values(by='test_acc', ascending=False)
+print("\nSummary of models:\n", results_df[['model','cv_mean','cv_std','test_acc']])
+
+best_model_name = results_df.iloc[0]['model']
+best_model_obj = results_df.iloc[0]['model_obj']
+print(f"\nBest model: {best_model_name} with test accuracy {results_df.iloc[0]['test_acc']:.4f}")
+
+# Save the best model and scaler
+joblib.dump(best_model_obj, os.path.join(RESULTS_DIR, f"best_model_{best_model_name}.joblib"))
+joblib.dump(scaler, os.path.join(RESULTS_DIR, f"scaler.joblib"))
+
+# Save results table
+results_df.to_csv(os.path.join(RESULTS_DIR, "model_comparison.csv"), index=False)
+
+print("\nAll results and figures saved to folder:", RESULTS_DIR)
