@@ -189,3 +189,6 @@ joblib.dump(scaler, os.path.join(RESULTS_DIR, f"scaler.joblib"))
 results_df.to_csv(os.path.join(RESULTS_DIR, "model_comparison.csv"), index=False)
 
 print("\nAll results and figures saved to folder:", RESULTS_DIR)
+git add heart_disease_pipeline.py
+git commit -m "Add full Python pipeline for cardiovascular disease prediction"
+git push -u origin main
